@@ -2,6 +2,13 @@
 from naoqi import ALProxy
 import numpy as np
 import pandas as pd
+import requests
+import os
+from dotenv import load_dotenv
+
+#define the openrouter.ai API key
+load_dotenv()
+api_key = os.getenv("API_KEY")
 
 #create tts connection to robot
 tts = ALProxy("ALTextToSpeech", "192.168.10.98", 9559)
@@ -20,10 +27,10 @@ try:
     user_fav_genre = user_row["favourite_dance_genre"].values[0]
     user_strengths = user_row["dance_strengths"].values[0]
     user_weaknesses = user_row["dance_weaknesses"].values[0]
+    #tts.say(f"Hi {user_name}! Are you ready for todays dance lesson?")
 except:
-    tts.say(f"I dont have any data on {user_name}. Do you want me to create a new profile for him?")
-    #[TO-DO] Create logic for making new profile
+    pass
+    #tts.say(f"I dont have any data on {user_name}. Do you want me to create a new profile for him?")
+    #[TO-DO] Create logic for making new profile but i dont think we need that for the project
 
-
-
-tts.say(user_weaknesses)
+pass
