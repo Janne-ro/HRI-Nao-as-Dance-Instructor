@@ -1,2 +1,2 @@
 FROM hri_env
-RUN pip install numpy pandas matplotlib requests os dotenv
+RUN pip install numpy pandas matplotlib requests dotenv 
