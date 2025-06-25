@@ -6,6 +6,8 @@ import requests
 import os
 from dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
+import sys
+import StringIO
 
 #define the openrouter.ai API key
 load_dotenv()
@@ -47,7 +49,7 @@ class KnowledgeGraph(object):
         """Add a triple to the graph"""
         self.triples.append((subject, relationship, obj))
 
-    def query(self, subject=None, relationship=None, obj=None):
+    def query(self, subject=None, relationship=None, object=None):
         """
         Query the graph using optional filters.
         Any of subject, relationship, or object can be None (wildcard).
@@ -56,7 +58,7 @@ class KnowledgeGraph(object):
         for s, r, o in self.triples:
             if ((subject is None or s == subject) and
                 (relationship is None or r == relationship) and
-                (obj is None or o == obj)):
+                (object is None or o == object)):
                 results.append((s, r, o))
         return results
 
@@ -126,52 +128,141 @@ class LLMChatSession(object):
         self.messages.append({"role": "assistant", "content": assistant_message})
 
         return assistant_message
+    
+#Helper function to turn the generated querys of the query_chat into actual entries of the kg (ie executing them)
+def execute_generated_querys(generated_querys):
+    #Split queries by semicolon
+    code_lines = generated_querys.split(';')
+
+    results = []
+
+    for line in code_lines:
+        line = line.strip()
+        if line:
+            try:
+                result = eval(line)  #evaluate kg.query()
+                results.append(result)
+            except:
+                pass #should never occur but sometimes free models are weird
+
+    return results
 
 #Initialize sessions
 user_chat = LLMChatSession() #primary chat with the user
 query_chat = LLMChatSession() #chat to generate querys to feed into the llm, equivalent to LOAD stage of ETL
 social_superviser_chat = LLMChatSession() #chat to check if any query or input to the LLM is harmfull
-functional_supervicer_chat = LLMChatSession() #chat to explain why an action cannot be done if it is harmfull
+functional_superviser_chat = LLMChatSession() #chat to explain why an action cannot be done if it is harmfull
 
 #Generate the system prompts for each session
 system_userchat_prompt = """You are Nao, an educational dance instructor for children. Right now you teach {}, a {} {}.
 Their primary strengths are {} and their weaknesses are {}. You initially asked 
-'Are you ready for today's lesson?'. You should finish your response with
-the question whether they are ready to get started. If they want to work on something else
+'Are you ready for today's lesson?'. Your next step should be to check
+whether they are ready to get started. If they want to work on something else
 try to motivate them to focus on their weaknesses. If they are really insistent you
-can give in after a while.""".format(user_name, user_age, user_gender, user_strengths, user_weaknesses)
+can give in after a while.
 
-system_querychat_prompt = """You are an module in a social robot that functions as a dance instructor for children. Your job 
-inside the robot is to generate querys to get information from a custom knowledge graph. 
-Only generate querys of the form kg.query(subject=<possible subject>, relationship=<possible realtionship>, object=<possible object>).
-You dont have to include subject, realtionship and object in each query. All of these are optional for example i can query what Alex Johnsons
-faviourite genre is with the query kg.query(subject="Alex Johnson, relationship="has_favourite_genre")
-Dont output anything else. Sperate each query by a , 
-An example output would be kg.query(realtionship="has_genre"), kg.query(object="Alex Johnson", subject="15")
-You will get some information on your current task as input and you should output the querys.
-The kg can onyl possibly include the following realtionships (object, realtionship, subject): 
-(<user_name>, "is_old", <user_age>)
-(<user_name>, "has_gender", <user_gender>)
-(<user_name>, "has_favourite_genre", <user_fav_genre>)
-(<user_name>, "has_weakness", <weakness>)
-(<user_name>, "has_strength", <strength>)
-(<song_title>, "good_for_weakness", <good_to_practice_skills>)
-(<song_title>, "by", <artist>)
-(<song_title>, "has_genre", <genre>)
-(<song_title>, "bad_to_pracitce", <bad_to_practice_skills>)
-Your current user_name is {}
+The session is twenty minutes long and you should start with a warmup to a song that you have to select together with the user.
+Again try to choose one that fits his genre preferences and his weaknesses if possible. 
+
+Additionally you will be given knowledge triplets about the user the songs and the environemnt from which you can infer
+your best possible action to maximize pedagogical outcome and learning gain""".format(user_name, user_age, user_gender, user_strengths, user_weaknesses)
+
+system_querychat_prompt = """You are a module in a social robot that acts as a dance instructor for children.
+Your job is to generate queries to retrieve information from a custom knowledge graph (kg).
+
+ONLY output Python-style queries using this format:
+kg.query(subject=<subject>, relationship=<relationship>, object=<object>)
+
+Each field (subject, relationship, object) is optional. Include only the parts needed for each query.
+Do NOT output anything else - just a list of ;-separated queries. 
+
+Example:
+To find Alex Johnson s favorite genre:
+    kg.query(subject="Alex Johnson", relationship="has_favourite_genre")
+
+Multiple queries should be separated by semicolons:
+    kg.query(relationship="has_genre"); kg.query(object="Alex Johnson")
+
+The knowledge graph contains only the following relationships:
+- (<user_name>, "is_old", <user_age>)
+- (<user_name>, "has_gender", <user_gender>)
+- (<user_name>, "has_favourite_genre", <user_fav_genre>)
+- (<user_name>, "has_weakness", <weakness>)
+- (<user_name>, "has_strength", <strength>)
+- (<song_title>, "good_for_weakness", <good_to_practice_skills>)
+- (<song_title>, "by", <artist>)
+- (<song_title>, "has_genre", <genre>)
+- (<song_title>, "bad_to_pracitce", <bad_to_practice_skills>)
+
+You will receive task-related input. From that, generate appropriate queries.
+Repeat: Only output valid kg.query() statements, nothing else.
+NEVER put anything in brackets <>, if you want to do that just leave it out.
+
+Current user_name: "{}"
 """.format(user_name)
 
-#start each session with the system prompt
+system_socialsupervisor_prompt = """ You are a safety module in a social robot for children acting as a dance instructor.
+
+Your task is to review the user's message and check if it contains any harmful, dangerous, or concerning content
+whether directed at the user, the robot, or others.
+
+Respond with:
+- YES, if the message is harmful in any way.
+- NO, if the message is safe.
+
+You will additionally be given your current knowledge in the form of knowledge triplets so you can infer the safety of the action.
+
+Only respond with YES or NO. Do not explain or output anything else. 
+"""
+
+system_functionalsupervisor_prompt = """ You are a safety module in a social robot for children acting as a dance instructor.
+
+Your task is to explain why the following message is concerning ie containing harmful, dangerous or concerning content wheter directed
+at the user, the robot or others. Phrase it in such a way as to explain to the child (user) why you cant execute the action. Also be empathic
+and offer help if you think that is necessary.
+
+You will additionally be given your current knowledge in the form of knowledge triplets so you can infer the safety of the action.
+
+Respond with the appropriate explanation for why this action is unsafe, dangerous or concerning.
+"""
+
+#start each session with the correspodning system prompt
 user_chat.start_session(system_userchat_prompt)
 query_chat.start_session(system_querychat_prompt)
+social_superviser_chat.start_session(system_socialsupervisor_prompt)
+functional_superviser_chat.start_session(system_functionalsupervisor_prompt)
 
 #Get the song that we want to do today
-querys = query_chat.send_message("Generate querys to find songs that are beneficial for the user to study")
-relevant_info = 
+querys = query_chat.send_message("Generate querys to find songs that 1) are good to practice for the weakness of the user and 2) are fitting to his genre preferences")
+relevant_info = execute_generated_querys(querys)
+
+#Helper function to create the chat pipeline with first generating the query and then running social and functional superviser 
+def chat_pipeline(user_input):
+
+    important_knowledge_prompt = """This is your current world knowledge and NOT part
+    of the user response: {}. The following is the user response: """.format(relevant_info) #get knowledge to feed to llm
+
+    social_superviser_reply = social_superviser_chat.send_message(important_knowledge_prompt + user_input)
+
+    if social_superviser_reply == "NO": #message is unharmful
+        kg_querys = query_chat.send_message("""Generate querys to extract information from the knoweldge 
+                                            graph that might be helpful for teaching the child. This is the user input: """ + user_input)
+        relevant_info.append(execute_generated_querys(kg_querys)) #update relevant info to the robot
+        #print(relevant_info)
+        user_chat_reply = user_chat.send_message(important_knowledge_prompt + user_input)
+        print(user_chat_reply)
+
+    elif social_superviser_reply == "YES": #message is harmful
+        functional_superviser_reply = functional_superviser_chat.send_message(important_knowledge_prompt + user_input)
+        print(functional_superviser_reply)
+        #tts.say(functional_superviser_reply)
+    
+    else:
+        print("Error, this shouldnt happen")
 
 # Now send messages in a loop or as needed, the model remembers context!
-reply = user_chat.send_message("Of course I am ready!")
+#reply = chat_pipeline("Of course I am ready! But I am thinking of hurting myself and destroying you") --> to show harmful content
+reply = chat_pipeline("Of course I am ready!")
 #tts.say(reply)
 print(reply)
 
