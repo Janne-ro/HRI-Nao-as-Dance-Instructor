@@ -14,14 +14,14 @@ load_dotenv()
 api_key = os.getenv("API_KEY")
 
 #create tts connection to robot
-tts = ALProxy("ALTextToSpeech", "192.168.10.98", 9559)
+tts = ALProxy("ALTextToSpeech", "192.168.64.1", 9559)
 
 #-------------------------------------------DATA MANAGMENT----------------------------------------
 
 #import required data
 df_users = pd.read_csv("users.csv")
 df_music = pd.read_csv("music.csv")
-#df_dancemoves = pd.read_csv("dancemoves.csv")
+df_dancemoves = pd.read_csv("dancemoves.csv")
 
 #EXTRACT info on the current user --> we assume an instructor already tells the robot which student is next
 user_name = "Alex Johnson"
@@ -32,13 +32,11 @@ try:
     user_fav_genre = user_row["favourite_dance_genre"].values[0]
     user_strengths = user_row["dance_strengths"].values[0]
     user_weaknesses = user_row["dance_weaknesses"].values[0]
-    tts.say("Hi {}! Are you ready for todays dance lesson?".format(user_name))
+    tts.say("Hi {}! Are you ready for todays dance lesson?".format(user_name.split()[0]))
 except:
     pass
     tts.say("I dont have any data on {}. Do you want me to create a new profile for him?".format(user_name))
     #[TO-DO] Create logic for making new profile but i dont think we need that for the project
-
-#[TO-DO] EXTRACT the song info
 
 #Create a custom knowledge graph because its stupid that we can only run python2 and everything is outdated
 class KnowledgeGraph(object):
@@ -60,10 +58,23 @@ class KnowledgeGraph(object):
                 (relationship is None or r == relationship) and
                 (object is None or o == object)):
                 results.append((s, r, o))
-        return results
 
-    def __str__(self):
-        return "\n".join(["{} --{}--> {}".format(s, r, o) for s, r, o in self.triples])
+        return results
+    
+    def delete(self, subject, relationship, obj):
+        """Delete a specific triple from the graph if it exists"""
+        try:
+            self.triples.remove((subject, relationship, obj))
+            return True
+        except ValueError:
+            return False
+
+    def modify(self, old_subject, old_relationship, old_object, new_subject, new_relationship, new_object):
+        """Modify an existing triple by replacing it with a new one"""
+        if self.delete(old_subject, old_relationship, old_object):
+            self.add(new_subject, new_relationship, new_object)
+            return True
+        return False
     
 #create knowledge graph
 kg = KnowledgeGraph()
@@ -79,10 +90,14 @@ for strength in user_strengths.split(", "):
 
 #EXTRACT and TRANSORM song data that is needed to make a decision on what song to dance to today
 for index, row in df_music.iterrows():
-    kg.add(row["song_title"], "good_for_weakness", row["good_to_practice_skills"])
+    kg.add(row["song_title"], "song_good_for_weakness", row["good_to_practice_skills"])
     kg.add(row["song_title"], "by", "artist")
     kg.add(row["song_title"], "has_genre", row["genre"])
-    kg.add(row["song_title"], "bad_to_pracitce", row["bad_to_practice_skills"])
+    kg.add(row["song_title"], "song_bad_for_weakness", row["bad_to_practice_skills"])
+
+#EXTRACT and TRANSFORM dance move data
+for index, row in df_dancemoves.iterrows():
+    kg.add(row["dancemove"], "dance_move_good_for", row["good_to_practice_skills"])
 
 #-------------------------------------------/DATA MANAGMENT----------------------------------------
 
@@ -92,7 +107,7 @@ for index, row in df_music.iterrows():
 class LLMChatSession(object):
     def __init__(self):
         self.api_key = api_key
-        self.model_name = "deepseek/deepseek-r1-0528-qwen3-8b:free"
+        self.model_name = "deepseek/deepseek-r1-0528-qwen3-8b:free" 
         self.headers = {
             "Authorization": "Bearer {}".format(api_key),
             "Content-Type": "application/json",
@@ -122,7 +137,10 @@ class LLMChatSession(object):
         response_json = response.json()
 
         #Extract assistant reply
-        assistant_message = response_json["choices"][0]["message"]["content"]
+        try:
+            assistant_message = response_json["choices"][0]["message"]["content"]
+        except:
+            print(response_json)
 
         #Append assistant reply to history
         self.messages.append({"role": "assistant", "content": assistant_message})
@@ -145,6 +163,12 @@ def execute_generated_querys(generated_querys):
             except:
                 pass #should never occur but sometimes free models are weird
 
+    #remove empty entries and resturcture data
+    results = [triple for sublist in results if sublist for triple in sublist]
+
+    #remove duplicates
+    results = sorted(set(results))
+
     return results
 
 #Initialize sessions
@@ -165,7 +189,15 @@ The session is twenty minutes long and you should start with a warmup to a song 
 Again try to choose one that fits his genre preferences and his weaknesses if possible. 
 
 Additionally you will be given knowledge triplets about the user the songs and the environemnt from which you can infer
-your best possible action to maximize pedagogical outcome and learning gain""".format(user_name, user_age, user_gender, user_strengths, user_weaknesses)
+your best possible action to maximize pedagogical outcome and learning gain.
+
+Give your answer in three parts. First what you want to say to the user, then wheter you want to
+execute a dance move and finally wheter you want to start playing a song.
+
+ALWAYS use the following format:
+TTS: <what you want to say to the user>
+DANCE MOVE: <NONE/or the name of the specific dance move>
+PLAY SONG: <NONE/or the name of the specific song, if you are already playing the song just put its name again>""".format(user_name, user_age, user_gender, user_strengths, user_weaknesses)
 
 system_querychat_prompt = """You are a module in a social robot that acts as a dance instructor for children.
 Your job is to generate queries to retrieve information from a custom knowledge graph (kg).
@@ -189,10 +221,11 @@ The knowledge graph contains only the following relationships:
 - (<user_name>, "has_favourite_genre", <user_fav_genre>)
 - (<user_name>, "has_weakness", <weakness>)
 - (<user_name>, "has_strength", <strength>)
-- (<song_title>, "good_for_weakness", <good_to_practice_skills>)
+- (<song_title>, "song_good_for_weakness", <good_to_practice_skills>)
 - (<song_title>, "by", <artist>)
 - (<song_title>, "has_genre", <genre>)
-- (<song_title>, "bad_to_pracitce", <bad_to_practice_skills>)
+- (<song_title>, "song_bad_for_weakness", <bad_to_practice_skills>)
+- (<dancemove>, "dance_move_good_for", <good_to_practice_skills>)
 
 You will receive task-related input. From that, generate appropriate queries.
 Repeat: Only output valid kg.query() statements, nothing else.
@@ -233,11 +266,14 @@ social_superviser_chat.start_session(system_socialsupervisor_prompt)
 functional_superviser_chat.start_session(system_functionalsupervisor_prompt)
 
 #Get the song that we want to do today
-querys = query_chat.send_message("Generate querys to find songs that 1) are good to practice for the weakness of the user and 2) are fitting to his genre preferences")
+querys = query_chat.send_message("""Generate querys to find songs that 1) are good to practice for the weakness of the user and 2) are fitting to his genre preferences.
+                                 They must include kg.query(relationship="has_genre"), kg.query(realtionship="song_good_for_weakness"), 
+                                 kg.query(relationship="dance_move_good_for"), kg.query(relationshoip = "has_favourite_genre") and 
+                                 kg.query(relationship = "has_weakness")""")
 relevant_info = execute_generated_querys(querys)
 
 #Helper function to create the chat pipeline with first generating the query and then running social and functional superviser 
-def chat_pipeline(user_input):
+def chat_pipeline(user_input, relevant_info):
 
     important_knowledge_prompt = """This is your current world knowledge and NOT part
     of the user response: {}. The following is the user response: """.format(relevant_info) #get knowledge to feed to llm
@@ -246,23 +282,31 @@ def chat_pipeline(user_input):
 
     if social_superviser_reply == "NO": #message is unharmful
         kg_querys = query_chat.send_message("""Generate querys to extract information from the knoweldge 
-                                            graph that might be helpful for teaching the child. This is the user input: """ + user_input)
-        relevant_info.append(execute_generated_querys(kg_querys)) #update relevant info to the robot
-        #print(relevant_info)
+                                            graph that might be helpful for teaching the child. This is the user input: """ + user_input) 
+        new_triples = execute_generated_querys(kg_querys)
+        relevant_info = sorted(set(relevant_info + new_triples)) #update relevant info to the robot, remove duplicates
         user_chat_reply = user_chat.send_message(important_knowledge_prompt + user_input)
         print(user_chat_reply)
+        tts.say(str(user_chat_reply.encode('ascii', 'ignore').decode())) #ignore unrecognised characters
 
     elif social_superviser_reply == "YES": #message is harmful
         functional_superviser_reply = functional_superviser_chat.send_message(important_knowledge_prompt + user_input)
         print(functional_superviser_reply)
-        #tts.say(functional_superviser_reply)
+        tts.say(str(functional_superviser_reply.encode('ascii', 'ignore').decode()))
     
     else:
-        print("Error, this shouldnt happen")
+        #shouldnt happen but you never know with cheap models
+        raise RuntimeError
+
+    return relevant_info
 
 # Now send messages in a loop or as needed, the model remembers context!
 #reply = chat_pipeline("Of course I am ready! But I am thinking of hurting myself and destroying you") --> to show harmful content
-reply = chat_pipeline("Of course I am ready!")
-#tts.say(reply)
-print(reply)
+relevant_info = chat_pipeline("Of course I am ready!", relevant_info)
 
+#start chat 
+while True:
+    user_input = raw_input("You: ") #python2 version of input
+    relevant_info = chat_pipeline(user_input, relevant_info)
+
+#[TO-DO] Actually include dance moves and song playing. 
