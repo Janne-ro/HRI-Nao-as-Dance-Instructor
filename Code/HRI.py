@@ -1,5 +1,6 @@
 #imports
 from naoqi import ALProxy
+from naoqi import qi
 import numpy as np
 import pandas as pd
 import requests
@@ -8,6 +9,9 @@ from dotenv import load_dotenv
 from requests.auth import HTTPBasicAuth
 import sys
 import StringIO
+import re
+import time
+import math
 
 #define the openrouter.ai API key
 load_dotenv()
@@ -98,9 +102,101 @@ for index, row in df_music.iterrows():
 #EXTRACT and TRANSFORM dance move data
 for index, row in df_dancemoves.iterrows():
     kg.add(row["dancemove"], "dance_move_good_for", row["good_to_practice_skills"])
+    kg.add("Nao", "knows_dance_move", row["dancemove"])
 
 #-------------------------------------------/DATA MANAGMENT----------------------------------------
 
+#------------------------------------------NAO CLASSES FOR SOUND AND MOVEMENT---------------------------------------
+class Music:
+    def __init__(self, session):
+        self.session = session
+        self.player = self.session.service('ALAudioPlayer')
+        self.playerStop = self.session.service('ALAudioPlayer')  # Still needed for clean stop
+        self.bIsRunning = False
+        self.ids = []
+
+    def play(self, filepath, loop=False):
+        self.bIsRunning = True
+        try:
+            if loop:
+                id = self.player.pCall("playFileInLoop", filepath)
+            else:
+                id = self.player.pCall("playFileFromPosition", filepath, 0.0)  # Start at 0 seconds
+            self.ids.append(id)
+            self.player.wait(id)
+        finally:
+            try:
+                self.ids.remove(id)
+            except:
+                pass
+            if not self.ids:
+                self.bIsRunning = False
+                print("Music playback finished.")
+
+    def stop(self):
+        for id in self.ids:
+            try:
+                self.playerStop.stop(id)
+            except:
+                pass
+        while self.bIsRunning:
+            time.sleep(0.2)
+
+def arm_circles():
+
+    # === Connect to robot ===
+    robot_ip = "192.168.64.1"  # Replace with your robot's IP
+    motion = ALProxy("ALMotion", robot_ip, 9559)
+    posture = ALProxy("ALRobotPosture", robot_ip, 9559)
+
+    # === Wake up and stand ===
+    motion.wakeUp()
+    posture.goToPosture("StandInit", 0.5)
+
+    # === Setup ===
+    effector = "LArm"
+    motion.setStiffnesses("LArm", 1.0)
+    FRAME_TORSO = 0
+    isAbsolute = True
+    useSensorValues = False
+
+    # OPTIONAL: Deactivate whole body balancer (avoids leg movement)
+    motion.wbEnable(False)
+
+    # Get current hand position
+    current = motion.getPosition(effector, FRAME_TORSO, useSensorValues)
+
+    # === Generate circle ===
+    radius = 0.2  # meters
+    center_x = current[0]
+    center_y = current[1]
+    center_z = current[2]
+
+    # Keep orientation fixed
+    orientation = current[3:6]
+
+    # === Perform continuous arm circles ===
+    try:
+        print("Starting arm circles. Press Ctrl+C to stop.")
+        while True:
+            for angle in range(0, 360, 10):  # Step every 10 degrees
+                theta = math.radians(angle)
+                x = center_x + radius * math.cos(theta)
+                y = center_y + radius * math.sin(theta)
+
+                target = [x, y, center_z] + orientation
+                motion.setPosition(effector, FRAME_TORSO, target, 0.2, isAbsolute)
+
+                time.sleep(0.05)  # Small delay for smoothness
+            print("Arm circles finished")
+    except KeyboardInterrupt:
+        print("\nInterrupted. Stopping.")
+
+    # === Return to rest ===
+    motion.rest()
+
+
+#------------------------------------------/NAO CLASSES FOR SOUND AND MOVEMENT---------------------------------------
 #Set up for LLM queries
 
 #Create a class to query the LLM 
@@ -171,6 +267,31 @@ def execute_generated_querys(generated_querys):
 
     return results
 
+def split_user_chat_reply(output):
+    # Extract TTS
+    tts_match = re.search(r'TTS:\s*(.*?)(?=DANCE MOVE:|PLAY SONG:|$)', output, re.DOTALL)
+    if tts_match:
+        tts_result = tts_match.group(1).strip()
+
+    # Extract DANCE MOVE
+    dance_match = re.search(r'DANCE MOVE:\s*(.*?)(?=TTS:|PLAY SONG:|$)', output, re.DOTALL)
+    if dance_match:
+        dancemove_result = dance_match.group(1).strip()
+
+    # Extract PLAY SONG
+    song_match = re.search(r'PLAY SONG:\s*(.*?)(?=TTS:|DANCE MOVE:|$)', output, re.DOTALL)
+    if song_match:
+        song_result = song_match.group(1).strip()
+
+    return tts_result, dancemove_result, song_result
+
+#create music player and dance move executer
+session = qi.Session()
+session.connect("tcp://192.168.64.1:9559")
+
+# Use the classes
+music_player = Music(session)
+
 #Initialize sessions
 user_chat = LLMChatSession() #primary chat with the user
 query_chat = LLMChatSession() #chat to generate querys to feed into the llm, equivalent to LOAD stage of ETL
@@ -226,6 +347,7 @@ The knowledge graph contains only the following relationships:
 - (<song_title>, "has_genre", <genre>)
 - (<song_title>, "song_bad_for_weakness", <bad_to_practice_skills>)
 - (<dancemove>, "dance_move_good_for", <good_to_practice_skills>)
+- ("Nao", "knows_dance_move", <dance_move>)
 
 You will receive task-related input. From that, generate appropriate queries.
 Repeat: Only output valid kg.query() statements, nothing else.
@@ -268,8 +390,8 @@ functional_superviser_chat.start_session(system_functionalsupervisor_prompt)
 #Get the song that we want to do today
 querys = query_chat.send_message("""Generate querys to find songs that 1) are good to practice for the weakness of the user and 2) are fitting to his genre preferences.
                                  They must include kg.query(relationship="has_genre"), kg.query(realtionship="song_good_for_weakness"), 
-                                 kg.query(relationship="dance_move_good_for"), kg.query(relationshoip = "has_favourite_genre") and 
-                                 kg.query(relationship = "has_weakness")""")
+                                 kg.query(relationship="dance_move_good_for"), kg.query(relationshoip = "has_favourite_genre") 
+                                 kg.query(relationship = "has_weakness") and kg.query(relationship="knows_dance_move")""")
 relevant_info = execute_generated_querys(querys)
 
 #Helper function to create the chat pipeline with first generating the query and then running social and functional superviser 
@@ -281,13 +403,29 @@ def chat_pipeline(user_input, relevant_info):
     social_superviser_reply = social_superviser_chat.send_message(important_knowledge_prompt + user_input)
 
     if social_superviser_reply == "NO": #message is unharmful
+
+        #generate querys and add results to the currently available knowledge
         kg_querys = query_chat.send_message("""Generate querys to extract information from the knoweldge 
                                             graph that might be helpful for teaching the child. This is the user input: """ + user_input) 
         new_triples = execute_generated_querys(kg_querys)
         relevant_info = sorted(set(relevant_info + new_triples)) #update relevant info to the robot, remove duplicates
+
+        #generate the user chat reply
         user_chat_reply = user_chat.send_message(important_knowledge_prompt + user_input)
         print(user_chat_reply)
-        tts.say(str(user_chat_reply.encode('ascii', 'ignore').decode())) #ignore unrecognised characters
+
+        #split the user chat reply to extract what to do
+        tts_output, dance_move, song = split_user_chat_reply(user_chat_reply)
+        tts.say(str(tts_output.encode('ascii', 'ignore').decode())) #ignore unrecognised characters
+
+        # Play music (not looping)
+        try:
+            music_player.play(song+".mp3")
+        except:
+            print("Cant play {}".format(song))
+
+        if dance_move=="Arm Circles":
+            arm_circles()
 
     elif social_superviser_reply == "YES": #message is harmful
         functional_superviser_reply = functional_superviser_chat.send_message(important_knowledge_prompt + user_input)
@@ -302,7 +440,8 @@ def chat_pipeline(user_input, relevant_info):
 
 # Now send messages in a loop or as needed, the model remembers context!
 #reply = chat_pipeline("Of course I am ready! But I am thinking of hurting myself and destroying you") --> to show harmful content
-relevant_info = chat_pipeline("Of course I am ready!", relevant_info)
+
+arm_circles()
 
 #start chat 
 while True:
@@ -310,3 +449,6 @@ while True:
     relevant_info = chat_pipeline(user_input, relevant_info)
 
 #[TO-DO] Actually include dance moves and song playing. 
+
+
+
