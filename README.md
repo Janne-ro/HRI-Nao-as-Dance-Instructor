@@ -4,6 +4,7 @@ This repo includes the programs used to devellop the project of Nao as a dance i
 
 ## Structure
 The Repo contains the Code subfolder which holds the implementation of the robot whereas the Notebook Fake_Data_Analysis holds an example analysis that could be used to empirically evaluate the project.
+The `functionality_benchmarks.ipynb` holds the examples of functionality benchmarks fo NAO dancing instructor task.
 
 ## How to run
 * Run the docker image provided in the course
