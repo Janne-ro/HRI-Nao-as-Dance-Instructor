@@ -16,7 +16,6 @@ import math
 #define the openrouter.ai API key
 load_dotenv()
 api_key = os.getenv("API_KEY")
-api_key = "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"
 
 #create tts connection to robot
 robot_ip = "192.168.244.116"

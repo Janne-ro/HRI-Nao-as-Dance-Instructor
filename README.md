@@ -11,3 +11,5 @@ The `functionality_benchmarks.ipynb` holds the examples of functionality benchma
 * Change the connection in the code to your individual IP-Adress and Port (if Coreograph is run on your local machine)
 * Mount the current directory and run the file using Python2 
 
+## Authors
+This project was created by the following authors 
