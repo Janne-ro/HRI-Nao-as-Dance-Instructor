@@ -16,9 +16,21 @@ import math
 #define the openrouter.ai API key
 load_dotenv()
 api_key = os.getenv("API_KEY")
+api_key = "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"
 
 #create tts connection to robot
-tts = ALProxy("ALTextToSpeech", "192.168.64.1", 9559)
+robot_ip = "192.168.244.116"
+tts = ALProxy("ALTextToSpeech", robot_ip, 9559)
+motion = ALProxy("ALMotion", robot_ip, 9559)
+posture = ALProxy("ALRobotPosture", robot_ip, 9559)
+
+#create animation session and animation player
+session = qi.Session()
+try:
+    session.connect("tcp://" + robot_ip + ":" + "9559")
+except:
+    print("Cant connect to robot session")
+animation_player_service = session.service("ALAnimationPlayer")
 
 #-------------------------------------------DATA MANAGMENT----------------------------------------
 
@@ -142,58 +154,20 @@ class Music:
         while self.bIsRunning:
             time.sleep(0.2)
 
-def arm_circles():
+#====Dances======
+def disco_hands():
+    print("Playing disco hands animation")
+    animation_player_service.run("animations/Entertainment/Dances/Nao/Disco")
 
-    # === Connect to robot ===
-    robot_ip = "192.168.64.1"  # Replace with your robot's IP
-    motion = ALProxy("ALMotion", robot_ip, 9559)
-    posture = ALProxy("ALRobotPosture", robot_ip, 9559)
+def headbang():
+    print("Playing headbang animation")
+    animation_player_service.run("animations/Entertainment/Dances/Nao/Headbang")
 
-    # === Wake up and stand ===
-    motion.wakeUp()
-    posture.goToPosture("StandInit", 0.5)
+def tai_chi_chuan():
+    print("Playing Tai Chi Chuan animation")
+    animation_player_service.run("animations/Entertainment/Dances/Nao/TaiChiChuan")
+#====/Dances=====
 
-    # === Setup ===
-    effector = "LArm"
-    motion.setStiffnesses("LArm", 1.0)
-    FRAME_TORSO = 0
-    isAbsolute = True
-    useSensorValues = False
-
-    # OPTIONAL: Deactivate whole body balancer (avoids leg movement)
-    motion.wbEnable(False)
-
-    # Get current hand position
-    current = motion.getPosition(effector, FRAME_TORSO, useSensorValues)
-
-    # === Generate circle ===
-    radius = 0.2  # meters
-    center_x = current[0]
-    center_y = current[1]
-    center_z = current[2]
-
-    # Keep orientation fixed
-    orientation = current[3:6]
-
-    # === Perform continuous arm circles ===
-    try:
-        print("Starting arm circles. Press Ctrl+C to stop.")
-        while True:
-            for angle in range(0, 360, 10):  # Step every 10 degrees
-                theta = math.radians(angle)
-                x = center_x + radius * math.cos(theta)
-                y = center_y + radius * math.sin(theta)
-
-                target = [x, y, center_z] + orientation
-                motion.setPosition(effector, FRAME_TORSO, target, 0.2, isAbsolute)
-
-                time.sleep(0.05)  # Small delay for smoothness
-            print("Arm circles finished")
-    except KeyboardInterrupt:
-        print("\nInterrupted. Stopping.")
-
-    # === Return to rest ===
-    motion.rest()
 
 
 #------------------------------------------/NAO CLASSES FOR SOUND AND MOVEMENT---------------------------------------
@@ -285,10 +259,6 @@ def split_user_chat_reply(output):
 
     return tts_result, dancemove_result, song_result
 
-#create music player and dance move executer
-session = qi.Session()
-session.connect("tcp://192.168.64.1:9559")
-
 # Use the classes
 music_player = Music(session)
 
@@ -378,7 +348,7 @@ and offer help if you think that is necessary.
 
 You will additionally be given your current knowledge in the form of knowledge triplets so you can infer the safety of the action.
 
-Respond with the appropriate explanation for why this action is unsafe, dangerous or concerning.
+Respond with the appropriate explanation for why this action is unsafe, dangerous or concerning. Your response should not be longer than 100 words.
 """
 
 #start each session with the correspodning system prompt
@@ -391,7 +361,7 @@ functional_superviser_chat.start_session(system_functionalsupervisor_prompt)
 querys = query_chat.send_message("""Generate querys to find songs that 1) are good to practice for the weakness of the user and 2) are fitting to his genre preferences.
                                  They must include kg.query(relationship="has_genre"), kg.query(realtionship="song_good_for_weakness"), 
                                  kg.query(relationship="dance_move_good_for"), kg.query(relationshoip = "has_favourite_genre") 
-                                 kg.query(relationship = "has_weakness") and kg.query(relationship="knows_dance_move")""")
+                                 kg.query(relationship = "has_weakness"), kg.query(relationship = "by") and kg.query(relationship="knows_dance_move")""")
 relevant_info = execute_generated_querys(querys)
 
 #Helper function to create the chat pipeline with first generating the query and then running social and functional superviser 
@@ -418,14 +388,24 @@ def chat_pipeline(user_input, relevant_info):
         tts_output, dance_move, song = split_user_chat_reply(user_chat_reply)
         tts.say(str(tts_output.encode('ascii', 'ignore').decode())) #ignore unrecognised characters
 
-        # Play music (not looping)
+        #Play music if nesesary(not looping)
         try:
             music_player.play(song+".mp3")
         except:
             print("Cant play {}".format(song))
 
-        if dance_move=="Arm Circles":
-            arm_circles()
+        #perform dance moves if nesecary
+        if dance_move=="Disco":
+            try:
+                disco_hands()
+            except:
+                pass
+
+        elif dance_move=="Headbang":
+            headbang()
+
+        elif dance_move=="Tai Chi Chuang":
+            tai_chi_chuan()
 
     elif social_superviser_reply == "YES": #message is harmful
         functional_superviser_reply = functional_superviser_chat.send_message(important_knowledge_prompt + user_input)
@@ -441,14 +421,13 @@ def chat_pipeline(user_input, relevant_info):
 # Now send messages in a loop or as needed, the model remembers context!
 #reply = chat_pipeline("Of course I am ready! But I am thinking of hurting myself and destroying you") --> to show harmful content
 
-arm_circles()
+
 
 #start chat 
 while True:
     user_input = raw_input("You: ") #python2 version of input
     relevant_info = chat_pipeline(user_input, relevant_info)
 
-#[TO-DO] Actually include dance moves and song playing. 
 
 
 
