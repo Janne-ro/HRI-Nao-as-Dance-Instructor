@@ -12,4 +12,8 @@ The `functionality_benchmarks.ipynb` holds the examples of functionality benchma
 * Mount the current directory and run the file using Python2 
 
 ## Authors
-This project was created by the following authors 
+This project was created by the following authors:
+* Aimee Lin
+* Evgeniia Rumiantseva
+* Janne Rotter
+All authors contributed equally. 
